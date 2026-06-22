@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -216,6 +216,60 @@ describe('bridge run final context usage', () => {
       inputTokens: 11,
       outputTokens: 7,
       contextTokens: 12345,
+    }))
+  })
+
+  it('sends uploaded image blocks to the bridge as OpenAI-compatible image_url parts', async () => {
+    const emit = vi.fn()
+    const nsp = makeNamespace(emit)
+    const socket = makeSocket()
+    const state = makeState()
+    const sessionMap = new Map([['session-1', state]])
+    const imagePath = join(homes[homes.length - 1], 'vision.png')
+    writeFileSync(imagePath, Buffer.from([1, 2, 3, 4]))
+    const bridge = {
+      chat: vi.fn().mockResolvedValue({ run_id: 'run-1', status: 'started' }),
+      contextEstimate: vi.fn().mockResolvedValue({
+        token_count: 12345,
+        fixed_context_tokens: 12327,
+        message_count: 2,
+        tool_count: 4,
+        system_prompt_chars: 13,
+      }),
+      streamOutput: vi.fn(async function* () {
+        yield { run_id: 'run-1', done: true, status: 'completed', output: 'done' }
+      }),
+    } as any
+
+    const { handleBridgeRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-bridge-run')
+    await handleBridgeRun(
+      nsp,
+      socket,
+      {
+        input: [
+          { type: 'text', text: 'describe this image' },
+          { type: 'image', name: 'vision.png', path: imagePath, media_type: 'image/png' },
+        ],
+        session_id: 'session-1',
+      },
+      'default',
+      sessionMap,
+      bridge,
+      false,
+      vi.fn(),
+      vi.fn(),
+    )
+
+    const bridgeMessage = bridge.chat.mock.calls[0][1]
+    expect(bridgeMessage).toEqual([
+      { type: 'text', text: 'describe this image' },
+      { type: 'text', text: `[Attached image: vision.png]\nLocal image path for tools: ${imagePath}` },
+      { type: 'image_url', image_url: { url: expect.stringMatching(/^data:image\/png;base64,/) } },
+    ])
+    expect(bridge.chat.mock.calls[0][5]).toEqual(expect.objectContaining({
+      storage_message: expect.stringContaining('"type":"image"'),
+      model: 'gpt-test',
+      provider: 'openai',
     }))
   })
 
